@@ -13,7 +13,7 @@ const { Search } = Input;
 const GraphVisualization = ({ data, onNodeClick, onNodeDoubleClick, height = 600 }) => {
   const svgRef = useRef(null);
   const [simulation, setSimulation] = useState(null);
-  const [zoom, setZoom] = useState(() => null);
+  const [zoom, setZoom] = useState(null);
   const [selectedNode, setSelectedNode] = useState(null);
   const [linkDistance, setLinkDistance] = useState(100);
   const [chargeStrength, setChargeStrength] = useState(-300);
@@ -34,7 +34,11 @@ const GraphVisualization = ({ data, onNodeClick, onNodeDoubleClick, height = 600
 
   const initGraph = useCallback(() => {
     try {
-      if (!svgRef.current) return;
+      // Early return if no data or svgRef
+      if (!data || !data.nodes || !data.edges || !svgRef.current) return;
+
+      // Validate data structure
+      if (!Array.isArray(data.nodes) || !Array.isArray(data.edges)) return;
 
       const svg = d3.select(svgRef.current);
       svg.selectAll('*').remove();
@@ -202,7 +206,14 @@ const GraphVisualization = ({ data, onNodeClick, onNodeDoubleClick, height = 600
   }, [data, height, linkDistance, chargeStrength, zoomHandler, onNodeClick, onNodeDoubleClick]);
 
   useEffect(() => {
-    if (data && data.nodes && data.edges && svgRef.current) {
+    // Only initialize graph when we have valid data
+    if (data &&
+      data.nodes &&
+      data.edges &&
+      Array.isArray(data.nodes) &&
+      Array.isArray(data.edges) &&
+      data.nodes.length > 0 &&
+      svgRef.current) {
       initGraph();
     }
 
@@ -214,10 +225,22 @@ const GraphVisualization = ({ data, onNodeClick, onNodeDoubleClick, height = 600
   }, [data, initGraph, simulation]);
 
   useEffect(() => {
-    if (simulation) {
-      simulation.force('link').distance(linkDistance);
-      simulation.force('charge').strength(chargeStrength);
-      simulation.alpha(0.3).restart();
+    if (simulation && simulation.force) {
+      try {
+        const linkForce = simulation.force('link');
+        const chargeForce = simulation.force('charge');
+
+        if (linkForce && typeof linkForce.distance === 'function') {
+          linkForce.distance(linkDistance);
+        }
+        if (chargeForce && typeof chargeForce.strength === 'function') {
+          chargeForce.strength(chargeStrength);
+        }
+
+        simulation.alpha(0.3).restart();
+      } catch (error) {
+        console.warn('Error updating simulation forces:', error);
+      }
     }
   }, [linkDistance, chargeStrength, simulation]);
 
@@ -258,26 +281,38 @@ const GraphVisualization = ({ data, onNodeClick, onNodeDoubleClick, height = 600
 
   const handleZoomIn = () => {
     if (zoom && svgRef.current) {
-      d3.select(svgRef.current).transition().call(
-        zoom.scaleBy, 1.5
-      );
+      try {
+        d3.select(svgRef.current).transition().call(
+          zoom.scaleBy, 1.5
+        );
+      } catch (error) {
+        console.warn('Zoom in error:', error);
+      }
     }
   };
 
   const handleZoomOut = () => {
     if (zoom && svgRef.current) {
-      d3.select(svgRef.current).transition().call(
-        zoom.scaleBy, 1 / 1.5
-      );
+      try {
+        d3.select(svgRef.current).transition().call(
+          zoom.scaleBy, 1 / 1.5
+        );
+      } catch (error) {
+        console.warn('Zoom out error:', error);
+      }
     }
   };
 
   const handleReset = () => {
     if (zoom && svgRef.current) {
-      d3.select(svgRef.current).transition().call(
-        zoom.transform,
-        d3.zoomIdentity
-      );
+      try {
+        d3.select(svgRef.current).transition().call(
+          zoom.transform,
+          d3.zoomIdentity
+        );
+      } catch (error) {
+        console.warn('Reset zoom error:', error);
+      }
     }
     if (simulation) {
       simulation.alpha(1).restart();
@@ -312,6 +347,26 @@ const GraphVisualization = ({ data, onNodeClick, onNodeDoubleClick, height = 600
   };
 
   const nodeTypes = data?.nodes ? [...new Set(data.nodes.map(n => n.type))] : [];
+
+  // Check if data is valid
+  const isValidData = data && data.nodes && data.edges && Array.isArray(data.nodes) && Array.isArray(data.edges);
+
+  if (!isValidData) {
+    return (
+      <div style={{
+        display: 'flex',
+        justifyContent: 'center',
+        alignItems: 'center',
+        height: height,
+        color: '#999',
+        border: '1px solid #d9d9d9',
+        borderRadius: '6px',
+        background: '#fff',
+      }}>
+        暂无图谱数据
+      </div>
+    );
+  }
 
   return (
     <div className="graph-visualization-container" style={{ position: 'relative' }}>
