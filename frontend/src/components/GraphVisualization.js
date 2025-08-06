@@ -1,12 +1,10 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
 import * as d3 from 'd3';
-import { Card, Button, Space, Slider, Select, Input, Tooltip, message } from 'antd';
+import { Card, Button, Space, Slider, Select, Input, Tooltip } from 'antd';
 import {
   ZoomInOutlined,
   ZoomOutOutlined,
   ReloadOutlined,
-  SearchOutlined,
-  FullscreenOutlined,
 } from '@ant-design/icons';
 
 const { Option } = Select;
@@ -15,24 +13,205 @@ const { Search } = Input;
 const GraphVisualization = ({ data, onNodeClick, onNodeDoubleClick, height = 600 }) => {
   const svgRef = useRef(null);
   const [simulation, setSimulation] = useState(null);
-  const [zoom, setZoom] = useState(null);
+  const [zoom, setZoom] = useState(() => null);
   const [selectedNode, setSelectedNode] = useState(null);
   const [linkDistance, setLinkDistance] = useState(100);
   const [chargeStrength, setChargeStrength] = useState(-300);
-  const [searchText, setSearchText] = useState('');
   const [nodeTypeFilter, setNodeTypeFilter] = useState('all');
 
+  // Create a stable reference for the zoom handler
+  const zoomHandler = useCallback((event) => {
+    try {
+      const svg = d3.select(svgRef.current);
+      const container = svg.select('.container');
+      if (!container.empty()) {
+        container.attr('transform', event.transform);
+      }
+    } catch (error) {
+      console.warn('Zoom handler error:', error);
+    }
+  }, []);
+
+  const initGraph = useCallback(() => {
+    try {
+      if (!svgRef.current) return;
+
+      const svg = d3.select(svgRef.current);
+      svg.selectAll('*').remove();
+
+      const svgNode = svg.node();
+      if (!svgNode) return;
+
+      const width = svgNode.getBoundingClientRect().width;
+      const graphHeight = height;
+
+      // 创建容器组
+      const container = svg.append('g').attr('class', 'container');
+
+      // 创建缩放行为
+      const zoomBehavior = d3.zoom()
+        .scaleExtent([0.1, 10])
+        .on('zoom', zoomHandler);
+
+      svg.call(zoomBehavior);
+      setZoom(zoomBehavior);
+
+      // 创建箭头标记
+      svg.append('defs').selectAll('marker')
+        .data(['arrow'])
+        .enter().append('marker')
+        .attr('id', d => d)
+        .attr('viewBox', '0 -5 10 10')
+        .attr('refX', 15)
+        .attr('refY', 0)
+        .attr('markerWidth', 6)
+        .attr('markerHeight', 6)
+        .attr('orient', 'auto')
+        .append('path')
+        .attr('d', 'M0,-5L10,0L0,5')
+        .attr('fill', '#999');
+
+      // 处理数据
+      const nodes = data.nodes.map(d => ({ ...d }));
+      const links = data.edges.map(d => ({ ...d }));
+
+      // 创建力导向布局
+      const sim = d3.forceSimulation(nodes)
+        .force('link', d3.forceLink(links).id(d => d.id).distance(linkDistance))
+        .force('charge', d3.forceManyBody().strength(chargeStrength))
+        .force('center', d3.forceCenter(width / 2, graphHeight / 2))
+        .force('collision', d3.forceCollide().radius(d => d.size + 5));
+
+      setSimulation(sim);
+
+      // 创建连线
+      const link = container.append('g')
+        .attr('class', 'links')
+        .selectAll('line')
+        .data(links)
+        .enter().append('line')
+        .attr('class', 'link')
+        .attr('stroke', '#999')
+        .attr('stroke-opacity', 0.6)
+        .attr('stroke-width', d => Math.sqrt(d.width || 1))
+        .attr('marker-end', 'url(#arrow)');
+
+      // 创建连线标签
+      const linkLabel = container.append('g')
+        .attr('class', 'link-labels')
+        .selectAll('text')
+        .data(links)
+        .enter().append('text')
+        .attr('class', 'edge-label')
+        .attr('font-size', '10px')
+        .attr('fill', '#666')
+        .attr('text-anchor', 'middle')
+        .text(d => d.relation);
+
+      // 创建节点
+      const node = container.append('g')
+        .attr('class', 'nodes')
+        .selectAll('circle')
+        .data(nodes)
+        .enter().append('circle')
+        .attr('class', 'node')
+        .attr('r', d => d.size || 10)
+        .attr('fill', d => getNodeColor(d.type))
+        .attr('stroke', '#fff')
+        .attr('stroke-width', 2)
+        .call(d3.drag()
+          .on('start', dragstarted)
+          .on('drag', dragged)
+          .on('end', dragended))
+        .on('click', (event, d) => {
+          // 移除之前选中节点的样式
+          d3.selectAll('.node').classed('selected', false);
+          // 为当前节点添加选中样式
+          d3.select(event.currentTarget).classed('selected', true);
+
+          setSelectedNode(d);
+          if (onNodeClick) {
+            onNodeClick(d);
+          }
+        })
+        .on('dblclick', (event, d) => {
+          if (onNodeDoubleClick) {
+            onNodeDoubleClick(d);
+          }
+        })
+        .on('mouseover', (event, d) => {
+          // 显示工具提示
+          showTooltip(event, d);
+        })
+        .on('mouseout', hideTooltip);
+
+      // 创建节点标签
+      const nodeLabel = container.append('g')
+        .attr('class', 'node-labels')
+        .selectAll('text')
+        .data(nodes)
+        .enter().append('text')
+        .attr('class', 'node-label')
+        .attr('font-size', '12px')
+        .attr('font-weight', '500')
+        .attr('text-anchor', 'middle')
+        .attr('dy', d => (d.size || 10) + 15)
+        .text(d => d.label.length > 10 ? d.label.substring(0, 10) + '...' : d.label);
+
+      // 力导向布局更新
+      sim.on('tick', () => {
+        link
+          .attr('x1', d => d.source.x)
+          .attr('y1', d => d.source.y)
+          .attr('x2', d => d.target.x)
+          .attr('y2', d => d.target.y);
+
+        linkLabel
+          .attr('x', d => (d.source.x + d.target.x) / 2)
+          .attr('y', d => (d.source.y + d.target.y) / 2);
+
+        node
+          .attr('cx', d => d.x)
+          .attr('cy', d => d.y);
+
+        nodeLabel
+          .attr('x', d => d.x)
+          .attr('y', d => d.y);
+      });
+
+      // 拖拽事件处理
+      function dragstarted(event, d) {
+        if (!event.active) sim.alphaTarget(0.3).restart();
+        d.fx = d.x;
+        d.fy = d.y;
+      }
+
+      function dragged(event, d) {
+        d.fx = event.x;
+        d.fy = event.y;
+      }
+
+      function dragended(event, d) {
+        if (!event.active) sim.alphaTarget(0);
+        d.fx = null;
+        d.fy = null;
+      }
+    } catch (error) {
+      console.error('Error initializing graph:', error);
+    }
+  }, [data, height, linkDistance, chargeStrength, zoomHandler, onNodeClick, onNodeDoubleClick]);
+
   useEffect(() => {
-    if (data && data.nodes && data.edges) {
+    if (data && data.nodes && data.edges && svgRef.current) {
       initGraph();
     }
-    
+
     return () => {
       if (simulation) {
         simulation.stop();
       }
     };
-  }, [data]);
+  }, [data, initGraph, simulation]);
 
   useEffect(() => {
     if (simulation) {
@@ -41,168 +220,6 @@ const GraphVisualization = ({ data, onNodeClick, onNodeDoubleClick, height = 600
       simulation.alpha(0.3).restart();
     }
   }, [linkDistance, chargeStrength, simulation]);
-
-  const initGraph = () => {
-    const svg = d3.select(svgRef.current);
-    svg.selectAll('*').remove();
-
-    const width = svg.node().getBoundingClientRect().width;
-    const graphHeight = height;
-
-    // 创建缩放行为
-    const zoomBehavior = d3.zoom()
-      .scaleExtent([0.1, 10])
-      .on('zoom', (event) => {
-        container.attr('transform', event.transform);
-      });
-
-    svg.call(zoomBehavior);
-    setZoom(zoomBehavior);
-
-    // 创建容器组
-    const container = svg.append('g').attr('class', 'container');
-
-    // 创建箭头标记
-    svg.append('defs').selectAll('marker')
-      .data(['arrow'])
-      .enter().append('marker')
-      .attr('id', d => d)
-      .attr('viewBox', '0 -5 10 10')
-      .attr('refX', 15)
-      .attr('refY', 0)
-      .attr('markerWidth', 6)
-      .attr('markerHeight', 6)
-      .attr('orient', 'auto')
-      .append('path')
-      .attr('d', 'M0,-5L10,0L0,5')
-      .attr('fill', '#999');
-
-    // 处理数据
-    const nodes = data.nodes.map(d => ({ ...d }));
-    const links = data.edges.map(d => ({ ...d }));
-
-    // 创建力导向布局
-    const sim = d3.forceSimulation(nodes)
-      .force('link', d3.forceLink(links).id(d => d.id).distance(linkDistance))
-      .force('charge', d3.forceManyBody().strength(chargeStrength))
-      .force('center', d3.forceCenter(width / 2, graphHeight / 2))
-      .force('collision', d3.forceCollide().radius(d => d.size + 5));
-
-    setSimulation(sim);
-
-    // 创建连线
-    const link = container.append('g')
-      .attr('class', 'links')
-      .selectAll('line')
-      .data(links)
-      .enter().append('line')
-      .attr('class', 'link')
-      .attr('stroke', '#999')
-      .attr('stroke-opacity', 0.6)
-      .attr('stroke-width', d => Math.sqrt(d.width || 1))
-      .attr('marker-end', 'url(#arrow)');
-
-    // 创建连线标签
-    const linkLabel = container.append('g')
-      .attr('class', 'link-labels')
-      .selectAll('text')
-      .data(links)
-      .enter().append('text')
-      .attr('class', 'edge-label')
-      .attr('font-size', '10px')
-      .attr('fill', '#666')
-      .attr('text-anchor', 'middle')
-      .text(d => d.relation);
-
-    // 创建节点
-    const node = container.append('g')
-      .attr('class', 'nodes')
-      .selectAll('circle')
-      .data(nodes)
-      .enter().append('circle')
-      .attr('class', 'node')
-      .attr('r', d => d.size || 10)
-      .attr('fill', d => getNodeColor(d.type))
-      .attr('stroke', '#fff')
-      .attr('stroke-width', 2)
-      .call(d3.drag()
-        .on('start', dragstarted)
-        .on('drag', dragged)
-        .on('end', dragended))
-      .on('click', (event, d) => {
-        // 移除之前选中节点的样式
-        d3.selectAll('.node').classed('selected', false);
-        // 为当前节点添加选中样式
-        d3.select(event.currentTarget).classed('selected', true);
-        
-        setSelectedNode(d);
-        if (onNodeClick) {
-          onNodeClick(d);
-        }
-      })
-      .on('dblclick', (event, d) => {
-        if (onNodeDoubleClick) {
-          onNodeDoubleClick(d);
-        }
-      })
-      .on('mouseover', (event, d) => {
-        // 显示工具提示
-        showTooltip(event, d);
-      })
-      .on('mouseout', hideTooltip);
-
-    // 创建节点标签
-    const nodeLabel = container.append('g')
-      .attr('class', 'node-labels')
-      .selectAll('text')
-      .data(nodes)
-      .enter().append('text')
-      .attr('class', 'node-label')
-      .attr('font-size', '12px')
-      .attr('font-weight', '500')
-      .attr('text-anchor', 'middle')
-      .attr('dy', d => (d.size || 10) + 15)
-      .text(d => d.label.length > 10 ? d.label.substring(0, 10) + '...' : d.label);
-
-    // 力导向布局更新
-    sim.on('tick', () => {
-      link
-        .attr('x1', d => d.source.x)
-        .attr('y1', d => d.source.y)
-        .attr('x2', d => d.target.x)
-        .attr('y2', d => d.target.y);
-
-      linkLabel
-        .attr('x', d => (d.source.x + d.target.x) / 2)
-        .attr('y', d => (d.source.y + d.target.y) / 2);
-
-      node
-        .attr('cx', d => d.x)
-        .attr('cy', d => d.y);
-
-      nodeLabel
-        .attr('x', d => d.x)
-        .attr('y', d => d.y);
-    });
-
-    // 拖拽事件处理
-    function dragstarted(event, d) {
-      if (!event.active) sim.alphaTarget(0.3).restart();
-      d.fx = d.x;
-      d.fy = d.y;
-    }
-
-    function dragged(event, d) {
-      d.fx = event.x;
-      d.fy = event.y;
-    }
-
-    function dragended(event, d) {
-      if (!event.active) sim.alphaTarget(0);
-      d.fx = null;
-      d.fy = null;
-    }
-  };
 
   const getNodeColor = (type) => {
     const colors = {
@@ -225,7 +242,7 @@ const GraphVisualization = ({ data, onNodeClick, onNodeDoubleClick, height = 600
     tooltip.transition()
       .duration(200)
       .style('opacity', .9);
-    
+
     tooltip.html(`
       <strong>${d.label}</strong><br/>
       类型: ${d.type}<br/>
@@ -240,7 +257,7 @@ const GraphVisualization = ({ data, onNodeClick, onNodeDoubleClick, height = 600
   };
 
   const handleZoomIn = () => {
-    if (zoom) {
+    if (zoom && svgRef.current) {
       d3.select(svgRef.current).transition().call(
         zoom.scaleBy, 1.5
       );
@@ -248,7 +265,7 @@ const GraphVisualization = ({ data, onNodeClick, onNodeDoubleClick, height = 600
   };
 
   const handleZoomOut = () => {
-    if (zoom) {
+    if (zoom && svgRef.current) {
       d3.select(svgRef.current).transition().call(
         zoom.scaleBy, 1 / 1.5
       );
@@ -256,7 +273,7 @@ const GraphVisualization = ({ data, onNodeClick, onNodeDoubleClick, height = 600
   };
 
   const handleReset = () => {
-    if (zoom) {
+    if (zoom && svgRef.current) {
       d3.select(svgRef.current).transition().call(
         zoom.transform,
         d3.zoomIdentity
@@ -268,7 +285,6 @@ const GraphVisualization = ({ data, onNodeClick, onNodeDoubleClick, height = 600
   };
 
   const handleSearch = (value) => {
-    setSearchText(value);
     if (value) {
       // 高亮搜索结果
       d3.selectAll('.node')
@@ -319,7 +335,7 @@ const GraphVisualization = ({ data, onNodeClick, onNodeDoubleClick, height = 600
               style={{ width: '100%' }}
             />
           </div>
-          
+
           <div>
             <Select
               placeholder="筛选节点类型"
